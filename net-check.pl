@@ -16,6 +16,7 @@ use warnings;
 use Getopt::Std qw//;
 use IO::Select qw//;
 use IO::Socket::INET qw//;
+use Sys::Syslog qw//;
 
 my $VERBOSE = 0;
 my $USERAGENT = "github.com/horgh/net-check";
@@ -47,7 +48,7 @@ sub main {
 			}
 			$consecutive_failures = 0;
 
-			sleep $args->{ timeout };
+			sleep $args->{ wait_time };
 			next;
 		}
 
@@ -62,7 +63,7 @@ sub main {
 			return &perform_recovery;
 		}
 
-		sleep $args->{ timeout };
+		sleep $args->{ wait_time };
 	}
 }
 
@@ -78,7 +79,7 @@ sub stdout {
 
 sub get_args {
 	my %args;
-	if (!Getopt::Std::getopts('hvt:n:p:a:f:', \%args)) {
+	if (!Getopt::Std::getopts('hvt:n:p:a:f:w:', \%args)) {
 		&usage;
 		return 0;
 	}
@@ -131,7 +132,7 @@ sub get_args {
 	}
 	$pattern = $args{a},
 
-	my $failures = 60;
+	my $failures = 6;
 	if (exists $args{f}) {
 		if (defined $args{f} && length $args{f} > 0 && $args{f} =~ /^[0-9]+$/) {
 			$failures = $args{f};
@@ -142,13 +143,25 @@ sub get_args {
 		}
 	}
 
+	my $wait_time = 600;
+	if (exists $args{w}) {
+		if (defined $args{w} && length $args{w} > 0 && $args{w} =~ /^[0-9]+$/) {
+			$wait_time = $args{w};
+		} else {
+			&stderr("Invalid wait time value.");
+			&usage;
+			return 0;
+		}
+	}
+
 	return {
-		verbose  => $verbose,
-		timeout  => $timeout,
-		host     => $host,
-		port     => $port,
-		pattern  => $pattern,
-		failures => $failures,
+		verbose   => $verbose,
+		timeout   => $timeout,
+		host      => $host,
+		port      => $port,
+		pattern   => $pattern,
+		failures  => $failures,
+		wait_time => $wait_time,
 	};
 }
 
@@ -162,8 +175,10 @@ Arguments:
     [-v]           : Enable verbose output.
 
     [-t <seconds>] : Timeout in seconds for connect/receive/send.
-                     This also controls how long to wait between requests.
                      Default 60.
+
+    [-w <seconds>] : Wait time in seconds between checks.
+                     Default 600.
 
     -n <host>      : Host to connect to.
 
@@ -171,8 +186,8 @@ Arguments:
 
     -a <string>    : String to look for in the response.
 
-   [-f <count>]    : Number of consecutive failures before we take action.
-                     Default 60.
+    [-f <count>]   : Number of consecutive failures before we take action.
+                     Default 6.
 ");
 }
 
@@ -295,7 +310,10 @@ sub recv_with_timeout {
 }
 
 sub perform_recovery {
-	&stdout("Recovery!");
+	&stdout("Recovering...");
+	Sys::Syslog::openlog('net-check', 'ndelay,nofatal,pid', 'user');
+	Sys::Syslog::syslog('info', "Recovering...");
+
 	system('/sbin/reboot');
 	return 1;
 }
