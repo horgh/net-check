@@ -60,7 +60,7 @@ sub main {
 
 		if ($consecutive_failures >= $args->{ failures }) {
 			&stderr("Failure threshold hit!");
-			return &perform_recovery;
+			return &perform_recovery($args->{ command });
 		}
 
 		sleep $args->{ wait_time };
@@ -79,7 +79,7 @@ sub stdout {
 
 sub get_args {
 	my %args;
-	if (!Getopt::Std::getopts('hvt:n:p:a:f:w:', \%args)) {
+	if (!Getopt::Std::getopts('hvt:n:p:a:f:w:c:', \%args)) {
 		&usage;
 		return undef;
 	}
@@ -105,13 +105,16 @@ sub get_args {
 		}
 	}
 
-	my $host;
-	if (!exists $args{n} || !defined $args{n} || length $args{n} == 0) {
-		&stderr("You must provide a hostname.");
-		&usage;
-		return undef;
+	my $host = 'summercat.com';
+	if (exists $args{n}) {
+		if (defined $args{n} && length $args{n} > 0) {
+			$host = $args{n};
+		} else {
+			&stderr("Invalid hostname.");
+			&usage;
+			return undef;
+		}
 	}
-	$host = $args{n};
 
 	my $port = 80;
 	if (exists $args{p}) {
@@ -124,13 +127,16 @@ sub get_args {
 		}
 	}
 
-	my $pattern;
-	if (!exists $args{a} || !defined $args{a} || length $args{a} == 0) {
-		&stderr("You must provide a string to look for.");
-		&usage;
-		return undef;
+	my $pattern = 'summercat.png';
+	if (exists $args{a}) {
+		if (defined $args{a} && length $args{a} > 0) {
+			$pattern = $args{a};
+		} else {
+			&stderr("Invalid pattern.");
+			&usage;
+			return undef;
+		}
 	}
-	$pattern = $args{a};
 
 	my $failures = 6;
 	if (exists $args{f}) {
@@ -154,6 +160,17 @@ sub get_args {
 		}
 	}
 
+	my $command = '/sbin/reboot';
+	if (exists $args{c}) {
+		if (defined $args{c} && length $args{c} > 0) {
+			$command = $args{c};
+		} else {
+			&stderr("Invalid command.");
+			&usage;
+			return undef;
+		}
+	}
+
 	return {
 		verbose   => $verbose,
 		timeout   => $timeout,
@@ -162,6 +179,7 @@ sub get_args {
 		pattern   => $pattern,
 		failures  => $failures,
 		wait_time => $wait_time,
+		command   => $command,
 	};
 }
 
@@ -180,14 +198,20 @@ Arguments:
     [-w <seconds>] : Wait time in seconds between checks.
                      Default 600.
 
-    -n <host>      : Host to connect to.
+    [-n <host>]    : Host to connect to.
+                     Default is summercat.com.
 
     [-p <port>]    : Port to connect to. Default port 80.
 
-    -a <string>    : String to look for in the response.
+    [-a <string>]  : String to look for in the response.
+                     Default is summercat.png.
 
     [-f <count>]   : Number of consecutive failures before we take action.
                      Default 6.
+
+    [-c <command>] : Command to run for recovery from failure.
+                     Default is /sbin/reboot.
+
 ");
 }
 
@@ -310,10 +334,13 @@ sub recv_with_timeout {
 }
 
 sub perform_recovery {
+	my ($command) = @_;
+
 	&stdout("Recovering...");
 	Sys::Syslog::openlog('net-check', 'ndelay,nofatal,pid', 'user');
 	Sys::Syslog::syslog('info', "Recovering...");
 
-	system('/sbin/reboot');
+	system($command);
+
 	return 1;
 }
