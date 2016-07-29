@@ -274,7 +274,7 @@ sub send_with_timeout {
 	}
 
 	&stderr("Timed out. Sent $sent bytes.");
-	return 1;
+	return 0;
 }
 
 sub recv_with_timeout {
