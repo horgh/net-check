@@ -81,12 +81,12 @@ sub get_args {
 	my %args;
 	if (!Getopt::Std::getopts('hvt:n:p:a:f:w:', \%args)) {
 		&usage;
-		return 0;
+		return undef;
 	}
 
 	if (exists $args{h}) {
 		&usage;
-		return 0;
+		return undef;
 	}
 
 	my $verbose = 0;
@@ -101,7 +101,7 @@ sub get_args {
 		} else {
 			&stderr("Invalid timeout value.");
 			&usage;
-			return 0;
+			return undef;
 		}
 	}
 
@@ -109,7 +109,7 @@ sub get_args {
 	if (!exists $args{n} || !defined $args{n} || length $args{n} == 0) {
 		&stderr("You must provide a hostname.");
 		&usage;
-		return 0;
+		return undef;
 	}
 	$host = $args{n};
 
@@ -120,7 +120,7 @@ sub get_args {
 		} else {
 			&stderr("Invalid port.");
 			&usage;
-			return 0;
+			return undef;
 		}
 	}
 
@@ -128,9 +128,9 @@ sub get_args {
 	if (!exists $args{a} || !defined $args{a} || length $args{a} == 0) {
 		&stderr("You must provide a string to look for.");
 		&usage;
-		return 0;
+		return undef;
 	}
-	$pattern = $args{a},
+	$pattern = $args{a};
 
 	my $failures = 6;
 	if (exists $args{f}) {
@@ -139,7 +139,7 @@ sub get_args {
 		} else {
 			&stderr("Invalid failures value.");
 			&usage;
-			return 0;
+			return undef;
 		}
 	}
 
@@ -150,7 +150,7 @@ sub get_args {
 		} else {
 			&stderr("Invalid wait time value.");
 			&usage;
-			return 0;
+			return undef;
 		}
 	}
 
