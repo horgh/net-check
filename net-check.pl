@@ -267,7 +267,7 @@ sub connected {
 	if ($VERBOSE) {
 		&stdout("Receiving...");
 	}
-	my ($headers, $body) = &recv_with_timeout($select, $timeout);
+	my ($headers, $body) = &read_response($select, $timeout);
 	$sock->shutdown(2);
 
 	if ($VERBOSE) {
@@ -281,7 +281,7 @@ sub connected {
 			&stdout($header);
 		}
 		&stdout("");
-		&stdout("Body");
+		&stdout("Body section:");
 		&stdout($body);
 	}
 
@@ -322,16 +322,50 @@ sub send_with_timeout {
 	return 0;
 }
 
-sub recv_with_timeout {
+sub read_response {
 	my ($select, $timeout) = @_;
 
-	my $response = '';
+	my ($headers, $buffer) = &read_headers($select, $timeout);
+	if (!$headers) {
+		&stderr("Unable to read headers");
+		return undef;
+	}
 
+	# Pull out some interesting headers.
+	# How to receive/decode the body depends on Transfer-Encoding.
+	# If no Transfer-Encoding, we use Content-Length to know how large the body is.
+	my $chunked_encoding = 0;
+	my $content_length = -1;
+	foreach my $header (@{ $headers }) {
+		if ($header =~ /^transfer-encoding: chunked$/i) {
+			$chunked_encoding = 1;
+		}
+		if ($header =~ /^content-length: (\d+)$/i) {
+			$content_length = $1;
+		}
+	}
+
+	my $body;
+	if ($chunked_encoding) {
+		$body = &read_chunked_body($select, $timeout, $buffer);
+	} else {
+		# Assume non-chunked. Use Content-Length.
+		$body = &read_non_chunked_body($select, $timeout, $buffer, $content_length);
+	}
+
+	if (!defined $body) {
+		&stderr("Unable to read body");
+		return undef;
+	}
+
+	return $headers, $body;
+}
+
+sub read_headers {
+	my ($select, $timeout) = @_;
+
+	my $buf = '';
 	my @headers;
-
-	my $separator = 0;
-
-	my $chunked = 0;
 
 	for (my $i = 0; $i < $timeout; $i++) {
 		my @ready = $select->can_read(1);
@@ -340,83 +374,73 @@ sub recv_with_timeout {
 		}
 		my $sock = $ready[0];
 
-		my $buf;
-		my $ret = recv $sock, $buf, 1024, 0;
+		my $recv_buf;
+		my $ret = recv $sock, $recv_buf, 1024, 0;
 		if (!defined $ret) {
 			&stderr("Recv failure");
 			return undef;
 		}
 
-		if (length $buf == 0) {
-			if ($VERBOSE) {
-				&stdout("EOF");
-			}
+		if (length $recv_buf == 0) {
+			&stderr("EOF");
 			return undef;
 		}
 
-		$response .= $buf;
+		$buf .= $recv_buf;
 
-		while (!$separator) {
-			my $crlf = index $response, "\r\n";
+		# Pull out all the headers we have received.
 
+		while (1) {
+			my $crlf = index $buf, "\r\n";
 			last if $crlf == -1;
 
-			my $line = substr $response, 0, $crlf, "";
+			my $line = substr $buf, 0, $crlf, "";
 			# Drop CRLF
-			substr $response, 0, 2, "";
-
-			if ($line =~ /^transfer-encoding: chunked$/i) {
-				if ($VERBOSE) {
-					&stdout("Chunked");
-				}
-				$chunked = 1;
-			}
+			substr $buf, 0, 2, "";
 
 			if (length $line == 0) {
 				if ($VERBOSE) {
 					&stdout("Found header/body separator");
 				}
-				$separator = 1;
-			} else {
-				push @headers, $line;
-				if ($VERBOSE) {
-					&stdout("Header line: $line");
-				}
-			}
-		}
-
-		if ($separator) {
-			if ($chunked) {
-				return \@headers, recv_chunked_body($select, $timeout, $response);
+				return \@headers, $buf;
 			}
 
-			# TODO: Non-chunked
+			push @headers, $line;
+			if ($VERBOSE) {
+				&stdout("Header line: $line");
+			}
 		}
 	}
 
+	&stderr("Timed out reading headers.");
 	return undef;
 }
 
-sub recv_chunked_body {
-	my ($select, $timeout, $response) = @_;
+# $buf is a buffer which contains data read from the connection but not yet
+# processed.
+#
+# We don't say that trailers are acceptable in our request, so we don't handle
+# them.
+# I also don't handle any chunk-ext.
+sub read_chunked_body {
+	my ($select, $timeout, $buf) = @_;
 
-	my $decoded = '';
-
+	my $decoded_body = '';
 	my $chunk_size = -1;
 
-	# We don't say that trailers are acceptable, so we don't handle them.
-
 	for (my $i = 0; $i < $timeout; $i++) {
-		# We need to figure out a chunk size to get.
+		# If we don't know a chunk size, then we're looking for the start of a
+		# chunk. We need to figure out a chunk size to get.
 		if ($chunk_size == -1) {
-			my $crlf = index $response, "\r\n";
+			my $crlf = index $buf, "\r\n";
 			if ($crlf != -1) {
-				# I expect no chunk-ext.
-				my $chunk_size_hex = substr $response, 0, $crlf, "";
-				$chunk_size = hex $chunk_size_hex;
+				my $chunk_size_hex = substr $buf, 0, $crlf, "";
+				# Drop the CRLF.
+				substr $buf, 0, 2, "";
 
-				# Drop the \r\n now too.
-				substr $response, 0, 2, "";
+				if (length $chunk_size_hex > 0) {
+					$chunk_size = hex $chunk_size_hex;
+				}
 
 				if ($VERBOSE) {
 					&stdout("Chunk size: $chunk_size (hex $chunk_size_hex)");
@@ -425,7 +449,7 @@ sub recv_chunked_body {
 				# Chunk size 0 means we're done.
 				if ($chunk_size == 0) {
 					# There should be a final CRLF too, but that's okay.
-					return $decoded;
+					return $decoded_body;
 				}
 			}
 		}
@@ -433,15 +457,15 @@ sub recv_chunked_body {
 		# We know what size chunk we want.
 		if ($chunk_size != -1) {
 			# Chunk size + 2 to account for CRLF ending chunk-data.
-			if (length $response >= $chunk_size+2) {
-				$decoded .= substr $response, 0, $chunk_size, "";
+			if (length $buf >= $chunk_size+2) {
+				$decoded_body .= substr $buf, 0, $chunk_size, "";
 				# Drop CRLF
-				substr $response, 0, 2, "";
+				substr $buf, 0, 2, "";
 				$chunk_size = -1;
 			}
 
 			# Don't read just yet. We have some in the buffer.
-			if (length $response > 0) {
+			if (length $buf > 0) {
 				next;
 			}
 		}
@@ -454,24 +478,64 @@ sub recv_chunked_body {
 		}
 		my $sock = $ready[0];
 
-		my $buf;
-		my $ret = recv $sock, $buf, 1024, 0;
+		my $recv_buf;
+		my $ret = recv $sock, $recv_buf, 1024, 0;
 		if (!defined $ret) {
 			&stderr("Recv failure");
-			return $decoded;
+			return undef;
 		}
 
-		if (length $buf == 0) {
-			if ($VERBOSE) {
-				&stdout("EOF");
-			}
-			return $decoded;
+		if (length $recv_buf == 0) {
+			&stderr("EOF");
+			return undef;
 		}
 
-		$response .= $buf;
+		$buf .= $recv_buf;
 	}
 
-	return $decoded;
+	&stderr("Timed out reading chunked body.");
+	return undef;
+}
+
+sub read_non_chunked_body {
+	my ($select, $timeout, $buf, $content_length) = @_;
+
+	# We need to know how large the body is.
+	# While it is not required per RFC, I'm going to require Content-Length.
+	if ($content_length <= 0) {
+		&stderr("No Content-Length available.");
+		return undef;
+	}
+
+	for (my $i = 0; $i < $timeout; $i++) {
+		if (length $buf >= $content_length) {
+			my $body = substr $buf, 0, $content_length;
+			return $body;
+		}
+
+		my @ready = $select->can_read(1);
+		if (!@ready) {
+			next;
+		}
+		my $sock = $ready[0];
+
+		my $recv_buf;
+		my $ret = recv $sock, $recv_buf, 1024, 0;
+		if (!defined $ret) {
+			&stderr("Recv failure");
+			return undef;
+		}
+
+		if (length $recv_buf == 0) {
+			&stderr("EOF");
+			return undef;
+		}
+
+		$buf .= $recv_buf;
+	}
+
+	&stderr("Timed out reading non-chunked body.");
+	return undef;
 }
 
 sub perform_recovery {
