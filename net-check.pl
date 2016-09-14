@@ -173,7 +173,7 @@ sub get_args {
 
 	my $show_response = 0;
 	if (exists $args{r}) {
-		$show_response= 1;
+		$show_response = 1;
 	}
 
 	return {
@@ -395,16 +395,10 @@ sub read_headers {
 			substr $buf, 0, 2, "";
 
 			if (length $line == 0) {
-				if ($VERBOSE) {
-					&stdout("Found header/body separator");
-				}
 				return \@headers, $buf;
 			}
 
 			push @headers, $line;
-			if ($VERBOSE) {
-				&stdout("Header line: $line");
-			}
 		}
 	}
 
@@ -438,10 +432,6 @@ sub read_chunked_body {
 					$chunk_size = hex $chunk_size_hex;
 				}
 
-				if ($VERBOSE) {
-					&stdout("Chunk size: $chunk_size (hex $chunk_size_hex)");
-				}
-
 				# Chunk size 0 means we're done.
 				if ($chunk_size == 0) {
 					# There should be a final CRLF too, but that's okay.
@@ -450,13 +440,16 @@ sub read_chunked_body {
 			}
 		}
 
-		# We know what size chunk we want.
+		# We know what size chunk we want. Pull out the chunk once we have enough
+		# data.
 		if ($chunk_size != -1) {
 			# Chunk size + 2 to account for CRLF ending chunk-data.
 			if (length $buf >= $chunk_size+2) {
 				$decoded_body .= substr $buf, 0, $chunk_size, "";
 				# Drop CRLF
 				substr $buf, 0, 2, "";
+
+				# Indicate we need a new chunk size.
 				$chunk_size = -1;
 
 				# Don't read again just yet. We have some in the buffer.
