@@ -256,19 +256,16 @@ sub connected {
 		return 0;
 	}
 
-	# Done writing.
-	# CloudFlare's httpd won't respond if we close our write side.
-	#if (!$sock->shutdown(1)) {
-	#	&stderr("Unable to shutdown socket (write)");
-	#	$sock->shutdown(2);
-	#	return 0;
-	#}
-
 	if ($VERBOSE) {
 		&stdout("Receiving...");
 	}
 	my ($headers, $body) = &read_response($select, $timeout);
 	$sock->shutdown(2);
+
+	if (!$headers) {
+		&stderr("Problem receiving response.");
+		return 0;
+	}
 
 	if ($VERBOSE) {
 		&stdout("Received body with " . length($body) . " bytes.");
@@ -277,7 +274,6 @@ sub connected {
 	if ($show_response) {
 		&stdout("Header section:");
 		foreach my $header (@{ $headers }) {
-			# There is CRLF in there already
 			&stdout($header);
 		}
 		&stdout("");
@@ -462,11 +458,11 @@ sub read_chunked_body {
 				# Drop CRLF
 				substr $buf, 0, 2, "";
 				$chunk_size = -1;
-			}
 
-			# Don't read just yet. We have some in the buffer.
-			if (length $buf > 0) {
-				next;
+				# Don't read again just yet. We have some in the buffer.
+				if (length $buf > 0) {
+					next;
+				}
 			}
 		}
 
