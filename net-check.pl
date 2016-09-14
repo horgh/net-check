@@ -42,7 +42,7 @@ sub main {
 
 	while (1) {
 		if (&connected($args->{ timeout }, $args->{ host }, $args->{ port },
-					$args->{ pattern })) {
+					$args->{ pattern }, $args->{ show_response })) {
 			if ($VERBOSE) {
 				&stdout("Connected");
 			}
@@ -79,7 +79,7 @@ sub stdout {
 
 sub get_args {
 	my %args;
-	if (!Getopt::Std::getopts('hvt:n:p:a:f:w:c:', \%args)) {
+	if (!Getopt::Std::getopts('hvt:n:p:a:f:w:c:r', \%args)) {
 		&usage;
 		return undef;
 	}
@@ -171,15 +171,21 @@ sub get_args {
 		}
 	}
 
+	my $show_response = 0;
+	if (exists $args{r}) {
+		$show_response= 1;
+	}
+
 	return {
-		verbose   => $verbose,
-		timeout   => $timeout,
-		host      => $host,
-		port      => $port,
-		pattern   => $pattern,
-		failures  => $failures,
-		wait_time => $wait_time,
-		command   => $command,
+		verbose       => $verbose,
+		timeout       => $timeout,
+		host          => $host,
+		port          => $port,
+		pattern       => $pattern,
+		failures      => $failures,
+		wait_time     => $wait_time,
+		command       => $command,
+		show_response => $show_response,
 	};
 }
 
@@ -212,11 +218,13 @@ Arguments:
     [-c <command>] : Command to run for recovery from failure.
                      Default is /sbin/reboot.
 
+    [-r]           : Show raw response (headers and decoded body).
+
 ");
 }
 
 sub connected {
-	my ($timeout, $host, $port, $pattern) = @_;
+	my ($timeout, $host, $port, $pattern, $show_response) = @_;
 
 	# I could use LWP here but I've had issues with its reliability and timeout
 	# behaviour in the past.
@@ -241,7 +249,7 @@ sub connected {
 	if ($VERBOSE) {
 		&stdout("Sending GET...");
 	}
-	my $get = "GET / HTTP/1.1\r\nHost: $host\r\nUser-Agent: $USERAGENT\r\n\r\n";
+	my $get = "GET / HTTP/1.1\r\nHost: $host\r\nUser-Agent: $USERAGENT\r\nAccept: */*\r\n\r\n";
 	if (!&send_with_timeout($select, $timeout, $get)) {
 		&stderr("Unable to send GET");
 		$sock->shutdown(2);
@@ -249,23 +257,36 @@ sub connected {
 	}
 
 	# Done writing.
-	if (!$sock->shutdown(1)) {
-		&stderr("Unable to shutdown socket (write)");
-		$sock->shutdown(2);
-		return 0;
-	}
+	# CloudFlare's httpd won't respond if we close our write side.
+	#if (!$sock->shutdown(1)) {
+	#	&stderr("Unable to shutdown socket (write)");
+	#	$sock->shutdown(2);
+	#	return 0;
+	#}
 
 	if ($VERBOSE) {
 		&stdout("Receiving...");
 	}
-	my $buf = &recv_with_timeout($select, $timeout);
+	my ($headers, $body) = &recv_with_timeout($select, $timeout);
 	$sock->shutdown(2);
 
 	if ($VERBOSE) {
-		&stdout("Received " . length($buf) . " bytes.");
+		&stdout("Received body with " . length($body) . " bytes.");
 	}
 
-	if (index($buf, $pattern) == -1) {
+	if ($show_response) {
+		&stdout("Header section:");
+		foreach my $header (@{ $headers }) {
+			# There is CRLF in there already
+			&stdout($header);
+		}
+		&stdout("");
+		&stdout("Body");
+		&stdout($body);
+	}
+
+	if (index($body, $pattern) == -1) {
+		&stdout("Pattern not found in the body!");
 		return 0;
 	}
 
@@ -306,6 +327,12 @@ sub recv_with_timeout {
 
 	my $response = '';
 
+	my @headers;
+
+	my $separator = 0;
+
+	my $chunked = 0;
+
 	for (my $i = 0; $i < $timeout; $i++) {
 		my @ready = $select->can_read(1);
 		if (!@ready) {
@@ -317,20 +344,134 @@ sub recv_with_timeout {
 		my $ret = recv $sock, $buf, 1024, 0;
 		if (!defined $ret) {
 			&stderr("Recv failure");
-			return $response;
+			return undef;
 		}
 
 		if (length $buf == 0) {
 			if ($VERBOSE) {
 				&stdout("EOF");
 			}
-			return $response;
+			return undef;
+		}
+
+		$response .= $buf;
+
+		while (!$separator) {
+			my $crlf = index $response, "\r\n";
+
+			last if $crlf == -1;
+
+			my $line = substr $response, 0, $crlf, "";
+			# Drop CRLF
+			substr $response, 0, 2, "";
+
+			if ($line =~ /^transfer-encoding: chunked$/i) {
+				if ($VERBOSE) {
+					&stdout("Chunked");
+				}
+				$chunked = 1;
+			}
+
+			if (length $line == 0) {
+				if ($VERBOSE) {
+					&stdout("Found header/body separator");
+				}
+				$separator = 1;
+			} else {
+				push @headers, $line;
+				if ($VERBOSE) {
+					&stdout("Header line: $line");
+				}
+			}
+		}
+
+		if ($separator) {
+			if ($chunked) {
+				return \@headers, recv_chunked_body($select, $timeout, $response);
+			}
+
+			# TODO: Non-chunked
+		}
+	}
+
+	return undef;
+}
+
+sub recv_chunked_body {
+	my ($select, $timeout, $response) = @_;
+
+	my $decoded = '';
+
+	my $chunk_size = -1;
+
+	# We don't say that trailers are acceptable, so we don't handle them.
+
+	for (my $i = 0; $i < $timeout; $i++) {
+		# We need to figure out a chunk size to get.
+		if ($chunk_size == -1) {
+			my $crlf = index $response, "\r\n";
+			if ($crlf != -1) {
+				# I expect no chunk-ext.
+				my $chunk_size_hex = substr $response, 0, $crlf, "";
+				$chunk_size = hex $chunk_size_hex;
+
+				# Drop the \r\n now too.
+				substr $response, 0, 2, "";
+
+				if ($VERBOSE) {
+					&stdout("Chunk size: $chunk_size (hex $chunk_size_hex)");
+				}
+
+				# Chunk size 0 means we're done.
+				if ($chunk_size == 0) {
+					# There should be a final CRLF too, but that's okay.
+					return $decoded;
+				}
+			}
+		}
+
+		# We know what size chunk we want.
+		if ($chunk_size != -1) {
+			# Chunk size + 2 to account for CRLF ending chunk-data.
+			if (length $response >= $chunk_size+2) {
+				$decoded .= substr $response, 0, $chunk_size, "";
+				# Drop CRLF
+				substr $response, 0, 2, "";
+				$chunk_size = -1;
+			}
+
+			# Don't read just yet. We have some in the buffer.
+			if (length $response > 0) {
+				next;
+			}
+		}
+
+		# Read more.
+
+		my @ready = $select->can_read(1);
+		if (!@ready) {
+			next;
+		}
+		my $sock = $ready[0];
+
+		my $buf;
+		my $ret = recv $sock, $buf, 1024, 0;
+		if (!defined $ret) {
+			&stderr("Recv failure");
+			return $decoded;
+		}
+
+		if (length $buf == 0) {
+			if ($VERBOSE) {
+				&stdout("EOF");
+			}
+			return $decoded;
 		}
 
 		$response .= $buf;
 	}
 
-	return $response;
+	return $decoded;
 }
 
 sub perform_recovery {
