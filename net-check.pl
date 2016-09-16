@@ -16,6 +16,7 @@ use warnings;
 use Getopt::Std qw//;
 use IO::Select qw//;
 use IO::Socket::INET qw//;
+use IO::Socket::SSL qw//;
 use Sys::Syslog qw//;
 
 my $VERBOSE = 0;
@@ -42,7 +43,7 @@ sub main {
 
 	while (1) {
 		if (&connected($args->{ timeout }, $args->{ host }, $args->{ port },
-					$args->{ pattern }, $args->{ show_response })) {
+					$args->{ pattern }, $args->{ show_response }, $args->{ tls })) {
 			if ($VERBOSE) {
 				&stdout("Connected");
 			}
@@ -79,7 +80,7 @@ sub stdout {
 
 sub get_args {
 	my %args;
-	if (!Getopt::Std::getopts('hvt:n:p:a:f:w:c:r', \%args)) {
+	if (!Getopt::Std::getopts('hvt:n:p:a:f:w:c:rs', \%args)) {
 		&usage;
 		return undef;
 	}
@@ -105,7 +106,7 @@ sub get_args {
 		}
 	}
 
-	my $host = 'summercat.com';
+	my $host = 'www.summercat.com';
 	if (exists $args{n}) {
 		if (defined $args{n} && length $args{n} > 0) {
 			$host = $args{n};
@@ -116,7 +117,13 @@ sub get_args {
 		}
 	}
 
+	my $tls = 0;
+	if (exists $args{s}) {
+		$tls = 1;
+	}
+
 	my $port = 80;
+	$port = 443 if $tls;
 	if (exists $args{p}) {
 		if (defined $args{p} && length $args{p} > 0 && $args{p} =~ /^[0-9]+$/) {
 			$port = $args{p};
@@ -186,6 +193,7 @@ sub get_args {
 		wait_time     => $wait_time,
 		command       => $command,
 		show_response => $show_response,
+		tls           => $tls,
 	};
 }
 
@@ -205,9 +213,10 @@ Arguments:
                      Default 600.
 
     [-n <host>]    : Host to connect to.
-                     Default is summercat.com.
+                     Default is www.summercat.com.
 
-    [-p <port>]    : Port to connect to. Default port 80.
+    [-p <port>]    : Port to connect to. Default port 80 without TLS, or 443
+                     with TLS.
 
     [-a <string>]  : String to look for in the response.
                      Default is summercat.png.
@@ -220,11 +229,13 @@ Arguments:
 
     [-r]           : Show raw response (headers and decoded body).
 
+    [-s]           : Connect with TLS.
+
 ");
 }
 
 sub connected {
-	my ($timeout, $host, $port, $pattern, $show_response) = @_;
+	my ($timeout, $host, $port, $pattern, $show_response, $tls) = @_;
 
 	# I could use LWP here but I've had issues with its reliability and timeout
 	# behaviour in the past.
@@ -232,13 +243,27 @@ sub connected {
 	if ($VERBOSE) {
 		&stdout("Connecting to $host:$port...");
 	}
-	my $sock = IO::Socket::INET->new(
-		PeerHost => $host,
-		PeerPort => $port,
-		Proto    => 'tcp',
-		Timeout  => $timeout,
-		Blocking => 0,
-	);
+
+	my $sock;
+
+	if (!$tls) {
+		$sock = IO::Socket::INET->new(
+			PeerHost => $host,
+			PeerPort => $port,
+			Proto    => 'tcp',
+			Timeout  => $timeout,
+			Blocking => 0,
+		);
+	} else {
+		$sock = IO::Socket::SSL->new(
+			PeerHost    => $host,
+			PeerPort    => $port,
+			Timeout     => $timeout,
+			Blocking    => 0,
+			# TLS 1.2 only.
+			SSL_version => '!SSLv2:!SSLv3:!TLSv1:!TLSv1_1:TLSv1_2',
+		);
+	}
 	if (!$sock) {
 		&stderr("Unable to open socket: $@");
 		return 0;
@@ -259,7 +284,7 @@ sub connected {
 	if ($VERBOSE) {
 		&stdout("Receiving...");
 	}
-	my ($headers, $body) = &read_response($select, $timeout);
+	my ($headers, $body) = &read_response($select, $timeout, $tls);
 	$sock->shutdown(2);
 
 	if (!$headers) {
@@ -301,9 +326,10 @@ sub send_with_timeout {
 		}
 		my $sock = $ready[0];
 
-		my $sz = send $sock, substr($msg, $sent), 0;
+		my $left = length($msg)-$sent;
+		my $sz = syswrite $sock, $msg, $left, $sent;
 		if (!defined $sz) {
-			&stderr("Send failure");
+			&stderr("syswrite failure: $!");
 			return 0;
 		}
 
@@ -319,9 +345,9 @@ sub send_with_timeout {
 }
 
 sub read_response {
-	my ($select, $timeout) = @_;
+	my ($select, $timeout, $tls) = @_;
 
-	my ($headers, $buffer) = &read_headers($select, $timeout);
+	my ($headers, $buffer) = &read_headers($select, $timeout, $tls);
 	if (!$headers) {
 		&stderr("Unable to read headers");
 		return undef;
@@ -343,10 +369,11 @@ sub read_response {
 
 	my $body;
 	if ($chunked_encoding) {
-		$body = &read_chunked_body($select, $timeout, $buffer);
+		$body = &read_chunked_body($select, $timeout, $buffer, $tls);
 	} else {
 		# Assume non-chunked. Use Content-Length.
-		$body = &read_non_chunked_body($select, $timeout, $buffer, $content_length);
+		$body = &read_non_chunked_body($select, $timeout, $buffer, $content_length,
+			$tls);
 	}
 
 	if (!defined $body) {
@@ -358,27 +385,33 @@ sub read_response {
 }
 
 sub read_headers {
-	my ($select, $timeout) = @_;
+	my ($select, $timeout, $tls) = @_;
 
 	my $buf = '';
 	my @headers;
 
+	my @handles = $select->handles;
+	my $sock = $handles[0];
+
 	for (my $i = 0; $i < $timeout; $i++) {
-		my @ready = $select->can_read(1);
-		if (!@ready) {
-			next;
+		# IO::Socket::SSL says we should not wait on socket reporting read ready.
+		# We should check if there is pending data first.
+		if (!$tls || !$sock->pending) {
+			my @ready = $select->can_read(1);
+			if (!@ready) {
+				next;
+			}
 		}
-		my $sock = $ready[0];
 
 		my $recv_buf;
-		my $ret = recv $sock, $recv_buf, 1024, 0;
-		if (!defined $ret) {
-			&stderr("Recv failure");
+		my $sz = sysread $sock, $recv_buf, 1024;
+		if (!defined $sz) {
+			&stderr("sysread failure: $!");
 			return undef;
 		}
 
-		if (length $recv_buf == 0) {
-			&stderr("EOF");
+		if ($sz == 0) {
+			&stderr("EOF.");
 			return undef;
 		}
 
@@ -413,7 +446,10 @@ sub read_headers {
 # them.
 # I also don't handle any chunk-ext.
 sub read_chunked_body {
-	my ($select, $timeout, $buf) = @_;
+	my ($select, $timeout, $buf, $tls) = @_;
+
+	my @handles = $select->handles;
+	my $sock = $handles[0];
 
 	my $decoded_body = '';
 	my $chunk_size = -1;
@@ -461,20 +497,21 @@ sub read_chunked_body {
 
 		# Read more.
 
-		my @ready = $select->can_read(1);
-		if (!@ready) {
-			next;
+		if (!$tls || !$sock->pending) {
+			my @ready = $select->can_read(1);
+			if (!@ready) {
+				next;
+			}
 		}
-		my $sock = $ready[0];
 
 		my $recv_buf;
-		my $ret = recv $sock, $recv_buf, 1024, 0;
-		if (!defined $ret) {
-			&stderr("Recv failure");
+		my $sz = sysread $sock, $recv_buf, 1024, 0;
+		if (!defined $sz) {
+			&stderr("sysread failure: $!");
 			return undef;
 		}
 
-		if (length $recv_buf == 0) {
+		if ($sz == 0) {
 			&stderr("EOF");
 			return undef;
 		}
@@ -487,7 +524,7 @@ sub read_chunked_body {
 }
 
 sub read_non_chunked_body {
-	my ($select, $timeout, $buf, $content_length) = @_;
+	my ($select, $timeout, $buf, $content_length, $tls) = @_;
 
 	# We need to know how large the body is.
 	# While it is not required per RFC, I'm going to require Content-Length.
@@ -496,26 +533,30 @@ sub read_non_chunked_body {
 		return undef;
 	}
 
+	my @handles = $select->handles;
+	my $sock = $handles[0];
+
 	for (my $i = 0; $i < $timeout; $i++) {
 		if (length $buf >= $content_length) {
 			my $body = substr $buf, 0, $content_length;
 			return $body;
 		}
 
-		my @ready = $select->can_read(1);
-		if (!@ready) {
-			next;
+		if (!$tls || !$sock->pending) {
+			my @ready = $select->can_read(1);
+			if (!@ready) {
+				next;
+			}
 		}
-		my $sock = $ready[0];
 
 		my $recv_buf;
-		my $ret = recv $sock, $recv_buf, 1024, 0;
-		if (!defined $ret) {
-			&stderr("Recv failure");
+		my $sz = sysread $sock, $recv_buf, 1024, 0;
+		if (!defined $sz) {
+			&stderr("sysread failure: $!");
 			return undef;
 		}
 
-		if (length $recv_buf == 0) {
+		if ($sz == 0) {
 			&stderr("EOF");
 			return undef;
 		}
