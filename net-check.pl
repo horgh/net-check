@@ -64,7 +64,12 @@ sub main {
 			if ($VERBOSE) {
 				&stderr("Failure threshold hit!");
 			}
+
 			&perform_recovery($args->{ command });
+
+			# Reset our failure count. We will try recovery again if we hit threshold
+			# once more.
+			$consecutive_failures = 0;
 		}
 
 		sleep $args->{ wait_time };
