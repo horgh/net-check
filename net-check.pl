@@ -45,7 +45,8 @@ sub main {
 
 	while (1) {
 		if (&connected($args->{ timeout }, $args->{ host }, $args->{ port },
-					$args->{ pattern }, $args->{ show_response }, $args->{ tls })) {
+					$args->{ path }, $args->{ pattern }, $args->{ show_response },
+					$args->{ tls })) {
 			if ($VERBOSE) {
 				&stdout("Connected");
 			}
@@ -89,7 +90,7 @@ sub stdout {
 
 sub get_args {
 	my %args;
-	if (!Getopt::Std::getopts('hvt:n:p:a:f:w:c:rs', \%args)) {
+	if (!Getopt::Std::getopts('hvt:n:p:e:a:f:w:c:rs', \%args)) {
 		&usage;
 		return undef;
 	}
@@ -138,6 +139,17 @@ sub get_args {
 			$port = $args{p};
 		} else {
 			&stderr("Invalid port.");
+			&usage;
+			return undef;
+		}
+	}
+
+	my $path = '/';
+	if (exists $args{e}) {
+		if (defined $args{e} && length $args{e} > 0) {
+			$path = $args{e};
+		} else {
+			&stderr("Invalid path.");
 			&usage;
 			return undef;
 		}
@@ -197,6 +209,7 @@ sub get_args {
 		timeout       => $timeout,
 		host          => $host,
 		port          => $port,
+		path          => $path,
 		pattern       => $pattern,
 		failures      => $failures,
 		wait_time     => $wait_time,
@@ -227,6 +240,10 @@ Arguments:
     [-p <port>]    : Port to connect to. Default port 80 without TLS, or 443
                      with TLS.
 
+    [-e <path>]    : Request path. If you wish to retrieve http://host/test.html
+                     then you would provide /test.html for this argument.
+                     The default is /.
+
     [-a <string>]  : String to look for in the response.
                      Default is summercat.png.
 
@@ -244,7 +261,7 @@ Arguments:
 }
 
 sub connected {
-	my ($timeout, $host, $port, $pattern, $show_response, $tls) = @_;
+	my ($timeout, $host, $port, $path, $pattern, $show_response, $tls) = @_;
 
 	# I could use LWP here but I've had issues with its reliability and timeout
 	# behaviour in the past.
@@ -283,7 +300,7 @@ sub connected {
 	if ($VERBOSE) {
 		&stdout("Sending GET...");
 	}
-	my $get = "GET / HTTP/1.1\r\nHost: $host\r\nUser-Agent: $USERAGENT\r\nAccept: */*\r\n\r\n";
+	my $get = "GET $path HTTP/1.1\r\nHost: $host\r\nUser-Agent: $USERAGENT\r\nAccept: */*\r\n\r\n";
 	if (!&send_with_timeout($select, $timeout, $get)) {
 		&stderr("Unable to send GET");
 		$sock->shutdown(2);
@@ -455,18 +472,32 @@ sub read_headers {
 
 		$buf .= $recv_buf;
 
+		if ($VERBOSE) {
+			&stdout("Read $sz bytes (" . length($buf) . " total) (headers) ($i)");
+		}
+
 		# Pull out all the headers we have received.
 
 		while (1) {
+			# Find a line ending with CRLF.
 			my $crlf = index $buf, "\r\n";
+
 			last if $crlf == -1;
 
+			# Pull out the line and replace it with "". Take everything except the
+			# CRLF.
 			my $line = substr $buf, 0, $crlf, "";
-			# Drop CRLF
+
+			# Drop the CRLF from the line we just extracted.
 			substr $buf, 0, 2, "";
 
+			# A 0 length line indicates the end of the headers.
 			if (length $line == 0) {
 				return \@headers, $buf;
+			}
+
+			if ($VERBOSE) {
+				&stdout("Header line: $line");
 			}
 
 			push @headers, $line;
