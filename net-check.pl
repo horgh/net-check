@@ -370,9 +370,19 @@ sub read_response {
 		return undef;
 	}
 
+	# First line in message headers section is the status line. See RFC 7230
+	# section 3.1.2 for its format.
+	#
+	# Require 200 status.
+	if ($headers->[0] !~ /^HTTP\/1\.[01] 200/i) {
+		&stderr("Unexpected status line: " . $headers->[0]);
+		return undef;
+	}
+
 	# Pull out some interesting headers.
-	# How to receive/decode the body depends on Transfer-Encoding.
-	# If no Transfer-Encoding, we use Content-Length to know how large the body is.
+	#
+	# How to receive/decode the body depends on Transfer-Encoding. If no
+	# Transfer-Encoding, we can use Content-Length to know how large the body is.
 	my $chunked_encoding = 0;
 	my $content_length = -1;
 	foreach my $header (@{ $headers }) {
@@ -384,11 +394,14 @@ sub read_response {
 		}
 	}
 
+	# Read the body. To know how long a body is, we can apply the rules in RFC 7230
+	# section 3.3.3. Note the below is not following the rules very strictly.
+
 	my $body;
 	if ($chunked_encoding) {
 		$body = &read_chunked_body($select, $timeout, $buffer, $tls);
 	} else {
-		# Assume non-chunked. Use Content-Length.
+		# Assume non-chunked. Use Content-Length if it is present.
 		$body = &read_non_chunked_body($select, $timeout, $buffer, $content_length,
 			$tls);
 	}
@@ -559,18 +572,20 @@ sub read_chunked_body {
 sub read_non_chunked_body {
 	my ($select, $timeout, $buf, $content_length, $tls) = @_;
 
-	# We need to know how large the body is.
-	# While it is not required per RFC, I'm going to require Content-Length.
-	if ($content_length <= 0) {
-		&stderr("No Content-Length available.");
-		return undef;
+	# Content-Length can tell us how long the body is. It is not required to be
+	# present however. If it is not present, we read until the server closes the
+	# connection.
+	if ($content_length == -1) {
+		if ($VERBOSE) {
+			&stderr("No Content-Length available.");
+		}
 	}
 
 	my @handles = $select->handles;
 	my $sock = $handles[0];
 
 	for (my $i = 0; $i < $timeout; $i++) {
-		if (length $buf >= $content_length) {
+		if ($content_length != -1 && length $buf >= $content_length) {
 			my $body = substr $buf, 0, $content_length;
 			return $body;
 		}
@@ -583,7 +598,7 @@ sub read_non_chunked_body {
 		}
 
 		my $recv_buf;
-		my $sz = sysread $sock, $recv_buf, 1024, 0;
+		my $sz = sysread $sock, $recv_buf, 10240, 0;
 		if (!defined $sz) {
 			# TLS may return EWOULDBLOCK and say SSL_WANT_READ/SSL_WANT_WRITE. In the
 			# case of WANT_WRITE we are to wait until the socket is writable and then
@@ -598,13 +613,30 @@ sub read_non_chunked_body {
 		}
 
 		if ($sz == 0) {
-			&stderr("EOF");
-			return undef;
+			if ($VERBOSE) {
+				&stderr("EOF");
+			}
+
+			# If there is a Content-Length then we should not have EOF yet since we have
+			# not fully read the response. But if there is not, EOF tells us the end of
+			# the message.
+
+			if ($content_length != -1) {
+				return undef;
+			}
+
+			return $buf;
 		}
 
 		$buf .= $recv_buf;
+
+		if ($VERBOSE) {
+			&stdout("Read $sz bytes (" . length($buf) . " total bytes) (non-chunked body) ($i).");
+		}
 	}
 
+	# If you see this error unexpectedly, we may have erroneously think we hit the
+	# timeout through having to loop and read too many times.
 	&stderr("Timed out reading non-chunked body.");
 	return undef;
 }
