@@ -1,13 +1,14 @@
 #
-# Purpose:
-# I have a few Raspberry Pi servers that periodically lose their connection for
-# one reason or another. To get them to come back is currently a manual
-# operation. I want this program to monitor for that happening, and then do
-# something. Probably simply reboot the server.
+# Purpose: I have a few Raspberry Pi servers that periodically lose their
+# connection for one reason or another. To get them to come back is currently a
+# manual operation. I want this program to monitor for that happening, and then
+# do something. Probably simply reboot the server.
 #
-# What I do is repeatedly make an HTTP request. I check that there is a response
-# I expect. If not, I increment a failure counter. If we hit a certain number of
-# failures before a success, then I try to recover connectivity.
+# What I do is repeatedly make an HTTP request. I check that there is a
+# response I expect. If not, I increment a failure counter. If we hit a certain
+# number of failures before a success, then I try to recover connectivity.
+#
+# This program runs as a daemon.
 #
 
 use strict;
@@ -60,8 +61,10 @@ sub main {
 		$consecutive_failures++;
 
 		if ($consecutive_failures >= $args->{ failures }) {
-			&stderr("Failure threshold hit!");
-			return &perform_recovery($args->{ command });
+			if ($VERBOSE) {
+				&stderr("Failure threshold hit!");
+			}
+			&perform_recovery($args->{ command });
 		}
 
 		sleep $args->{ wait_time };
@@ -572,6 +575,7 @@ sub perform_recovery {
 	my ($command) = @_;
 
 	&stdout("Recovering...");
+
 	Sys::Syslog::openlog('net-check', 'ndelay,nofatal,pid', 'user');
 	Sys::Syslog::syslog('info', "Recovering...");
 
