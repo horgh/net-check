@@ -18,6 +18,7 @@ use Getopt::Std qw//;
 use IO::Select qw//;
 use IO::Socket::INET qw//;
 use IO::Socket::SSL qw//;
+use POSIX qw//;
 use Sys::Syslog qw//;
 
 my $VERBOSE = 0;
@@ -337,6 +338,14 @@ sub send_with_timeout {
 		my $left = length($msg)-$sent;
 		my $sz = syswrite $sock, $msg, $left, $sent;
 		if (!defined $sz) {
+			# TLS may return EWOULDBLOCK and say SSL_WANT_READ/SSL_WANT_WRITE. In the
+			# case of WANT_READ we are to wait until the socket is readable and then
+			# retry our write. However, let's just try and wait again for write. I
+			# want the same timeout either way.
+			if ($! == POSIX::EWOULDBLOCK) {
+				next;
+			}
+
 			&stderr("syswrite failure: $!");
 			return 0;
 		}
@@ -414,6 +423,14 @@ sub read_headers {
 		my $recv_buf;
 		my $sz = sysread $sock, $recv_buf, 1024;
 		if (!defined $sz) {
+			# TLS may return EWOULDBLOCK and say SSL_WANT_READ/SSL_WANT_WRITE. In the
+			# case of WANT_WRITE we are to wait until the socket is writable and then
+			# retry our read. However, let's just try and wait again for read. I
+			# want the same timeout either way.
+			if ($! == POSIX::EWOULDBLOCK) {
+				next;
+			}
+
 			&stderr("sysread failure: $!");
 			return undef;
 		}
@@ -515,6 +532,14 @@ sub read_chunked_body {
 		my $recv_buf;
 		my $sz = sysread $sock, $recv_buf, 1024, 0;
 		if (!defined $sz) {
+			# TLS may return EWOULDBLOCK and say SSL_WANT_READ/SSL_WANT_WRITE. In the
+			# case of WANT_WRITE we are to wait until the socket is writable and then
+			# retry our read. However, let's just try and wait again for read. I
+			# want the same timeout either way.
+			if ($! == POSIX::EWOULDBLOCK) {
+				next;
+			}
+
 			&stderr("sysread failure: $!");
 			return undef;
 		}
@@ -560,6 +585,14 @@ sub read_non_chunked_body {
 		my $recv_buf;
 		my $sz = sysread $sock, $recv_buf, 1024, 0;
 		if (!defined $sz) {
+			# TLS may return EWOULDBLOCK and say SSL_WANT_READ/SSL_WANT_WRITE. In the
+			# case of WANT_WRITE we are to wait until the socket is writable and then
+			# retry our read. However, let's just try and wait again for read. I
+			# want the same timeout either way.
+			if ($! == POSIX::EWOULDBLOCK) {
+				next;
+			}
+
 			&stderr("sysread failure: $!");
 			return undef;
 		}
