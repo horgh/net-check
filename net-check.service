@@ -1,0 +1,9 @@
+[Unit]
+Requires=network.target
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/perl /home/will/code/net-check/net-check.pl -w 120 -n 192.168.1.254 -a '<title>Accueil</title>' -f 5 -c '/sbin/ifdown wlan2; /bin/sleep 10; /sbin/ifup wlan2'
+
+[Install]
+WantedBy=multi-user.target
